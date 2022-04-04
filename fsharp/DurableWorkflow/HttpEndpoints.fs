@@ -1,12 +1,14 @@
 module HttpEndpoints
 
 open Microsoft.Azure.WebJobs
+open Microsoft.Azure.WebJobs.Extensions.DurableTask
 open Microsoft.Azure.WebJobs.Extensions.Http
 open Microsoft.AspNetCore.Http
 open Microsoft.Extensions.Logging
 open FSharp.Control.Tasks.V2.ContextInsensitive
 open Microsoft.AspNetCore.Mvc
 open System
+open System.Collections.Generic
 open System.Threading
 
 open Workflow
@@ -20,7 +22,7 @@ type StopResponse = { Instances : seq<DurableOrchestrationStatus> }
 [<FunctionName("StartWorkflow")>]
 let startWorkflow
     ([<HttpTrigger(AuthorizationLevel.Anonymous, "get", Route = "start/{input}")>] req : HttpRequest)
-    ([<OrchestrationClient>] starter : DurableOrchestrationClient)
+    ([<DurableClient>] starter : IDurableOrchestrationClient)
     input
     (logger : ILogger) =
     task {
@@ -34,7 +36,7 @@ let startWorkflow
 [<FunctionName("CheckWorkflow")>]
 let checkWorkflow
     ([<HttpTrigger(AuthorizationLevel.Anonymous, "get", Route = "check/{input}")>] req : HttpRequest)
-    ([<OrchestrationClient>] starter : DurableOrchestrationClient)
+    ([<DurableClient>] starter : IDurableOrchestrationClient)
     input
     (logger : ILogger) =
     task {
@@ -42,23 +44,24 @@ let checkWorkflow
 
         let offset = TimeSpan.FromMinutes 20.
         let time = DateTime.UtcNow
+        let condition = new OrchestrationStatusQueryCondition(
+            CreatedTimeFrom = time.Subtract offset,
+            CreatedTimeTo = time.Add offset,
+            RuntimeStatus = List<OrchestrationRuntimeStatus>()
+        )
 
-        let! instances = starter.GetStatusAsync
-                                 (time.Subtract offset,
-                                  Nullable(time.Add offset),
-                                  System.Collections.Generic.List<OrchestrationRuntimeStatus>(),
-                                  CancellationToken.None)
+        let! result = starter.ListInstancesAsync(condition, CancellationToken.None)
 
         return OkObjectResult
-            ({ Instances = instances
-               MatchingInstances = instances
+            ({ Instances = result.DurableOrchestrationState
+               MatchingInstances = result.DurableOrchestrationState
                                    |> Seq.filter (fun i -> i.Name = eventName && i.Input.ToObject<string>() = input) })
     }
 
 [<FunctionName("StopWorkflow")>]
 let stopWorkflow
     ([<HttpTrigger(AuthorizationLevel.Anonymous, "get", Route = "stop/{input}")>] req : HttpRequest)
-    ([<OrchestrationClient>] starter : DurableOrchestrationClient)
+    ([<DurableClient>] starter : IDurableOrchestrationClient)
     input
     (logger : ILogger) =
     task {
@@ -66,14 +69,15 @@ let stopWorkflow
 
         let offset = TimeSpan.FromMinutes 20.
         let time = DateTime.UtcNow
+        let condition = new OrchestrationStatusQueryCondition(
+            CreatedTimeFrom = time.Subtract offset,
+            CreatedTimeTo = time.Add offset,
+            RuntimeStatus = List<OrchestrationRuntimeStatus>()
+        )
 
-        let! instances = starter.GetStatusAsync
-                                 (time.Subtract offset,
-                                  Nullable(time.Add offset),
-                                  System.Collections.Generic.List<OrchestrationRuntimeStatus>(),
-                                  CancellationToken.None)
+        let! result = starter.ListInstancesAsync(condition, CancellationToken.None)
 
-        return! match instances |> Seq.tryFind (fun i -> i.Name = eventName && i.Input.ToObject<string>() = input) with
+        return! match result.DurableOrchestrationState |> Seq.tryFind (fun i -> i.Name = eventName && i.Input.ToObject<string>() = input) with
                 | Some instance ->
                     task {
                         logger.LogInformation(sprintf "Found a matching instance with id %s" instance.InstanceId)
@@ -87,6 +91,6 @@ let stopWorkflow
                         sprintf "Didn't find a matching instance for %s" input |> logger.LogInformation
 
                         return NotFoundObjectResult
-                            ({ Instances = instances }) :> IActionResult
+                            ({ Instances = result.DurableOrchestrationState }) :> IActionResult
                     }
     }
